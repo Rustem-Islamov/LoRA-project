@@ -1828,7 +1828,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def lorapro_full_adjustment(self, partition_id):
         beta1 = 0.9
         beta2 = 0.999
-        
+        is_first_lorapro_step = self.global_step == 1
         
         for idx, (grad_A_orin, grad_B_orin) in enumerate(zip(self.averaged_gradients[0][::2], self.averaged_gradients[0][1::2])):
             A = self.params_in_partition[0][2 * idx]
@@ -1836,35 +1836,58 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # projection
             delta = 1e-8     
 
+            # For ordinary LoRA-Pro, effective_A is A. For the M_x variant the
+            # adapter forward is B @ A @ P_x, so LoRA-Pro must operate on the
+            # effective right factor C = A @ P_x. P_x is diagonal and frozen
+            # during forward/backward. Autograd gives grad_A = grad_C @ P_x;
+            # convert to grad_C here, run LoRA-Pro in (B, C) coordinates, and
+            # convert the adjusted result back before the underlying SGD step.
+            mx_state = getattr(A, "_lorapro_mx_state", None)
+            scaling_factor = float(getattr(A, "_lorapro_scaling", 16 / 8))
+            if mx_state is not None:
+                px = mx_state.metric_scale().to(device=A.device, dtype=A.dtype)
+                if px.ndim != 1 or px.numel() != A.shape[1]:
+                    raise RuntimeError(
+                        f"Invalid M_x scale shape {tuple(px.shape)} for LoRA A {tuple(A.shape)}"
+                    )
+                px_inverse = px.reciprocal()
+                effective_A = A * px.unsqueeze(0)
+                grad_A_effective_orin = grad_A_orin * px_inverse.unsqueeze(0)
+            else:
+                px_inverse = None
+                effective_A = A
+                grad_A_effective_orin = grad_A_orin
+
             # computing the inverse matrix
             import math
-            scaling_factor = 16 / 8
-            AA_T = A @ A.T
+            AA_T = effective_A @ effective_A.T
             B_TB = B.T @ B
 
-            if self.global_step == 0:
-                AA_T_inv = torch.linalg.pinv(AA_T + delta * torch.eye(A.shape[0], device=grad_A_orin.device)) 
+            if is_first_lorapro_step:
+                AA_T_inv = torch.linalg.pinv(AA_T + delta * torch.eye(effective_A.shape[0], device=grad_A_orin.device))
                 AA_T_inv = AA_T_inv.to(A.dtype)
-                grad_A = grad_A_orin
+                grad_A = grad_A_effective_orin
                 grad_B = (1 / scaling_factor ** 2) * grad_B_orin @ AA_T_inv
             else: 
-                AA_T_inv = torch.linalg.pinv(AA_T + delta * torch.eye(A.shape[0], device=grad_A_orin.device)) 
-                B_TB_inv = torch.linalg.pinv(B_TB + delta * torch.eye(A.shape[0], device=grad_A_orin.device)) 
+                AA_T_inv = torch.linalg.pinv(AA_T + delta * torch.eye(effective_A.shape[0], device=grad_A_orin.device))
+                B_TB_inv = torch.linalg.pinv(B_TB + delta * torch.eye(effective_A.shape[0], device=grad_A_orin.device))
                 AA_T_inv = AA_T_inv.to(A.dtype)
                 B_TB_inv = B_TB_inv.to(A.dtype)
 
-                grad_A = (1 / scaling_factor ** 2) * B_TB_inv @ grad_A_orin
+                grad_A = (1 / scaling_factor ** 2) * B_TB_inv @ grad_A_effective_orin
                 grad_B = (1 / scaling_factor ** 2) * ((torch.eye(B.shape[0], device=grad_A_orin.device, dtype=A.dtype) - B @ B_TB_inv @ B.T) @ grad_B_orin @ AA_T_inv)   
-            equiv_grad = scaling_factor * B @ grad_A + scaling_factor * grad_B @ A
+            equiv_grad = scaling_factor * B @ grad_A + scaling_factor * grad_B @ effective_A
 
             if idx not in self.exp_avg.keys():
                 self.exp_avg[idx] = (1 - beta1) * equiv_grad
                 self.exp_avg_sq[idx] = (1 - beta2) * (equiv_grad * equiv_grad)
             else:
                 self.exp_avg[idx].lerp_(equiv_grad, 1 - beta1)
-                self.exp_avg_sq[idx].mul_(beta2).addcmul_(equiv_grad.to(torch.bfloat16), equiv_grad.conj().to(torch.bfloat16), value=1 - beta2)
+                self.exp_avg_sq[idx].mul_(beta2).addcmul_(equiv_grad, equiv_grad.conj(), value=1 - beta2)
                 
-            step = self.global_step + 1
+            # global_step is incremented immediately before this method is
+            # called, so the first Adam-equivalent update is step 1.
+            step = self.global_step
             
             bias_correction1 = 1 - beta1 ** step
             bias_correction2 = 1 - beta2 ** step
@@ -1876,21 +1899,26 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             g = g.to(B.dtype)
             
             grad_A_orin_ = scaling_factor * B.T @ g
-            grad_B_orin_ = scaling_factor * g @ A.T
+            grad_B_orin_ = scaling_factor * g @ effective_A.T
             
             grad_A_orin.data = grad_A_orin_
             grad_B_orin.data = grad_B_orin_
             
-            if self.global_step == 0:
+            if is_first_lorapro_step:
                 grad_A = grad_A_orin_
                 grad_B = (1 / scaling_factor ** 2) * grad_B_orin_ @ AA_T_inv
             else: 
-                X = solve_sylvester(B.T @ B, A @ A.T, -(1 / scaling_factor ** 2) * B_TB_inv @ grad_A_orin_ @ A.T)
+                X = solve_sylvester(B.T @ B, effective_A @ effective_A.T, -(1 / scaling_factor ** 2) * B_TB_inv @ grad_A_orin_ @ effective_A.T)
                 X = torch.tensor(X, device=grad_A_orin.device, dtype=B.dtype)
 
-                grad_A = (1 / scaling_factor ** 2) * B_TB_inv @ grad_A_orin_ + X @ A
+                grad_A = (1 / scaling_factor ** 2) * B_TB_inv @ grad_A_orin_ + X @ effective_A
                 grad_B = (1 / scaling_factor ** 2) * ((torch.eye(B.shape[0], device=grad_A_orin.device, dtype=A.dtype) - B @ B_TB_inv @ B.T) @ grad_B_orin_ @ AA_T_inv) - B @ X   
-    
+
+            # The optimizer updates stored A. Convert the desired update of
+            # C = A P_x back with P_x^{-1}; M_x itself receives no gradient.
+            if px_inverse is not None:
+                grad_A = grad_A * px_inverse.unsqueeze(0)
+
             grad_A_orin.data = grad_A
             grad_B_orin.data = grad_B    
         

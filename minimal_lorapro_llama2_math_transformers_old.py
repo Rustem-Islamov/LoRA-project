@@ -45,7 +45,7 @@ def set_seed(seed):
 
 def get_arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--lora', default="lora", type=str)
+    parser.add_argument('--lora', default="rslora-pro", type=str)
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--lr', default=2e-5, type=float)
     args = parser.parse_args()
@@ -114,11 +114,18 @@ def main():
         bias="none",
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"],
         task_type="CAUSAL_LM",
-        use_rslora=True if "rs" in args.lora else False,
+        use_rslora=True,
     )
     scaling_factor = (lora_alpha / math.sqrt(lora_r)) if "rs" in args.lora else (lora_alpha / lora_r)
     
     model = peft.get_peft_model(model, lora_config)
+
+    assert model.peft_config["default"].use_rslora is True
+    print(
+        "use_rslora:",
+        model.peft_config["default"].use_rslora,
+        flush=True,
+    )
     model.print_trainable_parameters()
     
     if args.lora not in ["lora", "rslora"]: 
@@ -167,22 +174,33 @@ def main():
         logging_dir="./transformers_logs",
         do_train=True,
         num_train_epochs=1,
+
         per_device_train_batch_size=per_device_batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,
-        optim="adamw_torch",
+
+        # Required by the repository's modified DeepSpeed for LoRA-Pro.
+        optim="sgd",
+
         logging_steps=1,
         bf16=True,
         learning_rate=args.lr,
         weight_decay=0.0,
         warmup_ratio=0.03,
         lr_scheduler_type="cosine",
+
         report_to="wandb" if local_rank == 0 else "none",
         label_names=["labels"],
         ddp_find_unused_parameters=False,
+
         do_eval=False,
+        per_device_eval_batch_size=1,
         evaluation_strategy="no",
+        eval_steps=-1,
+        seed=args.seed,
+        data_seed=args.seed,
+
         save_strategy="no",
-        deepspeed=None,
+        deepspeed="./config/deepspeed_zero2.json" if world_size > 1 else None,
     )
     
     # Step 4: Trainer

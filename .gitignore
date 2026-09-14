@@ -1,0 +1,19 @@
+
+# BEGIN LOCAL EXPERIMENT ARTIFACTS
+models/
+data/
+data_cache/
+logs/
+wandb/
+*.out
+*.err
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.env
+.env.*
+*.pem
+*.key
+# END LOCAL EXPERIMENT ARTIFACTS

@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=lora-code
-#SBATCH --output=logs/slurm/%x_%A_%a.out
-#SBATCH --error=logs/slurm/%x_%A_%a.err
+#SBATCH --output=logs/lora-code_%x_%A_%a.out
+#SBATCH --error=logs/lora-code_%x_%A_%a.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --partition=a100-80g
+#SBATCH --partition=a100-80g,a100
 #SBATCH --qos=a100-6hours
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=30G
+#SBATCH --mem=160G
 #SBATCH --time=03:00:00
 
 set -euo pipefail

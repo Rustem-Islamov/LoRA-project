@@ -21,8 +21,21 @@ RESULT_DIR="${RUN_DIR}/humaneval"
 
 module purge
 module load CUDA/12.1.1
-eval "$(conda shell.bash hook)"
-conda activate lorapro39
+
+LORAPRO_ENV="${LORAPRO_ENV:-${SLURM_SUBMIT_DIR}/.venv}"
+
+if [[ ! -x "$LORAPRO_ENV/bin/python" ]]; then
+    echo "LoRA-Pro environment not found: $LORAPRO_ENV" >&2
+    echo "Run install_lorapro.sh on the cluster first." >&2
+    exit 1
+fi
+
+export VIRTUAL_ENV="$LORAPRO_ENV"
+export PATH="$LORAPRO_ENV/bin:$PATH"
+unset PYTHONHOME
+
+echo "Python: $(command -v python)"
+python --version
 
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
 export PATH="${CUDA_HOME}/bin:${PATH}"

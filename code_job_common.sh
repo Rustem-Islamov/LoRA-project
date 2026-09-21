@@ -43,7 +43,6 @@ export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
 
 export PYTHONHASHSEED="$SEED"
 export TOKENIZERS_PARALLELISM=false
-export WANDB_MODE=disabled
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -52,7 +51,7 @@ export NCCL_DEBUG=WARN
 # This sweep uses ordinary Pro / RS-Pro, without the M_x extension.
 unset LORAPRO_REQUIRE_MX
 
-test -f ./models/llama-2-7b/config.json
+test -f /scicore/home/lucchi0001/zhao0005/models/llama-2-7b/config.json
 
 echo "Method=$METHOD Seed=$SEED LR=$LR Rank=$LORA_R Alpha=$LORA_ALPHA"
 echo "Run directory: $RUN_DIR"

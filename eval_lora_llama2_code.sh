@@ -4,12 +4,12 @@
 #SBATCH --error=logs/slurm/%x_%A_%a.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --partition=a100-80g
-#SBATCH --qos=a100-6hours
+#SBATCH --partition=lucchi-h200
+#SBATCH --qos=lucchi
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=80G
-#SBATCH --time=03:00:00
+#SBATCH --mem=160G
+#SBATCH --time=02:00:00
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:?}"
@@ -23,10 +23,10 @@ mkdir -p "$RESULT_DIR"
 
 srun --ntasks=1 --kill-on-bad-exit=1 \
     python evaluation/eval_llama2_code.py \
-    --base-model ./models/llama-2-7b \
+    --base-model /scicore/home/lucchi0001/zhao0005/models/llama-2-7b \
     --adapter-path "$RUN_DIR" \
     --output-file "${RESULT_DIR}/samples.jsonl" \
-    --batch-size 4 \
+    --batch-size 16 \
     --max-new-tokens 512
 
 # Run this scoring process within the cluster's supported code sandbox.

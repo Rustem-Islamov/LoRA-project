@@ -3,6 +3,7 @@
 models/
 data/
 data_cache/
+peta/tasks/__pycache__/
 logs/
 wandb/
 *.out

@@ -19,6 +19,9 @@ from transformers import (
 )
 
 import peta
+import wandb
+
+os.environ.setdefault("WANDB_SILENT", "true")
 
 TARGET_MODULES = [
     "q_proj", "k_proj", "v_proj", "o_proj",
@@ -93,6 +96,38 @@ def main():
     output = Path(args.output_dir)
     if (output / "adapter_config.json").exists():
         raise FileExistsError(f"An adapter already exists in {output}")
+
+    wandb_run = None
+    wandb_enabled = os.getenv("WANDB_MODE", "online").lower() != "disabled"
+    if global_rank == 0 and wandb_enabled:
+        wandb_run = wandb.init(
+            entity=os.getenv("WANDB_ENTITY") or None,
+            project=os.getenv("WANDB_PROJECT", "LLAMA-2-7B"),
+            name=run_name,
+            group="Transformers-Math",
+            config={
+                "method": args.lora,
+                "learning_rate": args.lr,
+                "seed": args.seed,
+                "data_seed": args.seed,
+                "rank": LORA_RANK,
+                "lora_alpha": LORA_ALPHA,
+                "use_rslora": True,
+                "scaling_formula": "alpha/sqrt(rank)",
+                "scaling_factor": LORA_ALPHA / math.sqrt(LORA_RANK),
+                "m_x_averaging": args.m_x_averaging,
+                "m_x_damping": args.m_x_damping,
+                "m_x_scale_clip": args.m_x_scale_clip,
+                "metric_tag": run_metric_tag,
+                "metric_definition": "diagonal EMA of mean squared adapter inputs",
+                "metric_update_timing": "once per optimizer step",
+                "metric_requires_grad": False,
+                "global_batch_size": args.global_batch_size,
+                "per_device_train_batch_size": args.per_device_train_batch_size,
+                "gradient_accumulation_steps": gradient_accumulation_steps,
+                "epochs": 1,
+            },
+        )
 
     base_model = "./models/llama-2-7b"
     tokenizer = AutoTokenizer.from_pretrained(base_model)
@@ -194,6 +229,7 @@ def main():
         max_grad_norm=1.0,
         warmup_ratio=0.03,
         lr_scheduler_type="cosine",
+        report_to=["wandb"] if wandb_enabled else [],
         bf16=True,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
@@ -287,6 +323,13 @@ def main():
             training_args.to_json_string()
         )
         (output / "TRAINING_COMPLETE").touch()
+
+        if wandb_run is not None:
+            wandb_run.summary["optimizer_steps"] = int(trainer.state.global_step)
+            wandb_run.summary["metric_updates_per_layer"] = int(
+                trainer.state.global_step
+            )
+            wandb.finish()
 
     if dist.is_initialized():
         dist.barrier()

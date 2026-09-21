@@ -5,8 +5,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --partition=lucchi-h200
-#SBATCH --qos=lucchi
-#SBATCH --gres=gpu:1
+#SBATCH --qos=h200
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=160G
 #SBATCH --time=06:00:00

@@ -16,7 +16,11 @@ fi
 read -r METHOD SEED LR LORA_R LORA_ALPHA <<< "${ROWS[$TASK_ID]}"
 
 SWEEP_DIR="$(dirname "$MANIFEST")"
-RUN_DIR="${SWEEP_DIR}/runs/${METHOD}/r${LORA_R}_a${LORA_ALPHA}/lr${LR}/seed${SEED}"
+if [[ "$METHOD" == "full-ft" ]]; then
+    RUN_DIR="${SWEEP_DIR}/runs/full-ft/lr${LR}/seed${SEED}"
+else
+    RUN_DIR="${SWEEP_DIR}/runs/${METHOD}/r${LORA_R}_a${LORA_ALPHA}/lr${LR}/seed${SEED}"
+fi
 RESULT_DIR="${RUN_DIR}/humaneval"
 
 module purge

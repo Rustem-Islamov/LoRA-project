@@ -17,17 +17,40 @@ source ./code_job_common.sh "$@"
 
 export OMP_NUM_THREADS=4
 
-test -f "${RUN_DIR}/TRAINING_COMPLETE"
-test -f "${RUN_DIR}/adapter_config.json"
-mkdir -p "$RESULT_DIR"
+# test -f "${RUN_DIR}/TRAINING_COMPLETE"
+# test -f "${RUN_DIR}/adapter_config.json"
+# mkdir -p "$RESULT_DIR"
 
+# srun --ntasks=1 --kill-on-bad-exit=1 \
+#     python evaluation/eval_llama2_code.py \
+#     --base-model /scicore/home/lucchi0001/zhao0005/models/llama-2-7b \
+#     --adapter-path "$RUN_DIR" \
+#     --output-file "${RESULT_DIR}/samples.jsonl" \
+#     --batch-size 16 \
+#     --max-new-tokens 512
+
+export PYTHONUNBUFFERED=1
+if [[ ! -f "$RUN_DIR/TRAINING_COMPLETE" ]]; then
+    echo "ERROR: training did not complete: $RUN_DIR" >&2
+    exit 1
+fi
+
+if [[ "$METHOD" == "full-ft" ]]; then
+    MODEL_ARGS=(--model-path "$RUN_DIR")
+else
+    MODEL_ARGS=(--base-model ./models/llama-2-7b --adapter-path "$RUN_DIR")
+fi
+
+mkdir -p "$RESULT_DIR"
+echo "Generating HumanEval predictions for $METHOD..."
 srun --ntasks=1 --kill-on-bad-exit=1 \
     python evaluation/eval_llama2_code.py \
-    --base-model /scicore/home/lucchi0001/zhao0005/models/llama-2-7b \
-    --adapter-path "$RUN_DIR" \
-    --output-file "${RESULT_DIR}/samples.jsonl" \
-    --batch-size 16 \
+    "${MODEL_ARGS[@]}" \
+    --output-file "$RESULT_DIR/samples.jsonl" \
+    --batch-size 4 \
     --max-new-tokens 512
+
+echo "Generation finished; scoring HumanEval..."
 
 # Run this scoring process within the cluster's supported code sandbox.
 srun --ntasks=1 --kill-on-bad-exit=1 \
@@ -53,11 +76,11 @@ generation = json.loads(
 )
 
 result = {
-    "method": training["lora"],
+    "method": training.get("method", training.get("lora")),
+    "rank": training.get("rank"),
+    "alpha": training.get("alpha"),
     "seed": training["seed"],
     "learning_rate": training["lr"],
-    "rank": training["rank"],
-    "alpha": training["alpha"],
     "generation": generation,
     "metrics": {key: float(value) for key, value in metrics.items()},
 }

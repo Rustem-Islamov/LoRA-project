@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 from human_eval.data import read_problems, write_jsonl
-from peft import PeftModel
+# from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
 
@@ -25,7 +25,9 @@ def clean_completion(text):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-model", default="./models/llama-2-7b")
-    parser.add_argument("--adapter-path", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--adapter-path")
+    source.add_argument("--model-path", help="Full fine-tuned checkpoint directory")
     parser.add_argument("--output-file", required=True)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-new-tokens", type=int, default=512)
@@ -42,25 +44,44 @@ def main():
     set_seed(0)
     torch.cuda.set_device(0)
 
-    adapter = Path(args.adapter_path)
-    if not (adapter / "TRAINING_COMPLETE").is_file():
-        raise RuntimeError(f"Training did not finish successfully: {adapter}")
+    checkpoint = Path(args.adapter_path or args.model_path)
+    if not (checkpoint / "TRAINING_COMPLETE").is_file():
+        raise RuntimeError(f"Training did not finish successfully: {checkpoint}")
+
+    if args.adapter_path:
+        if not (checkpoint / "adapter_config.json").is_file():
+            raise FileNotFoundError(f"Missing adapter_config.json: {checkpoint}")
+    else:
+        if (checkpoint / "adapter_config.json").exists():
+            raise ValueError("Use --adapter-path for a PEFT adapter checkpoint.")
+        weight_files = (
+            "model.safetensors", "model.safetensors.index.json",
+            "pytorch_model.bin", "pytorch_model.bin.index.json",
+        )
+        if not (checkpoint / "config.json").is_file() or not any(
+            (checkpoint / name).is_file() for name in weight_files
+        ):
+            raise FileNotFoundError(f"Missing full-model checkpoint: {checkpoint}")
 
     tokenizer = AutoTokenizer.from_pretrained(
-        adapter,
-        padding_side="left",
+        checkpoint, padding_side="left", local_files_only=True,
     )
     if tokenizer.eos_token_id is None:
         raise ValueError("Tokenizer must define an EOS token.")
     tokenizer.pad_token = tokenizer.eos_token
 
-    base = AutoModelForCausalLM.from_pretrained(
-        args.base_model,
+    model_source = args.base_model if args.adapter_path else str(checkpoint)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_source,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
         device_map={"": 0},
+        local_files_only=True,
     )
-    model = PeftModel.from_pretrained(base, adapter)
+    if args.adapter_path:
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, checkpoint)
+
     model.eval()
     model.config.use_cache = True
 
@@ -99,11 +120,20 @@ def main():
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
         )
-        continuations = tokenizer.batch_decode(
-            output[:, prompt_width:],
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
+        decode_kwargs = {
+            "skip_special_tokens": True,
+            "clean_up_tokenization_spaces": False,
+        }
+        decoded_prompts = tokenizer.batch_decode(
+            encoded["input_ids"], **decode_kwargs
         )
+        decoded_full = tokenizer.batch_decode(output, **decode_kwargs)
+
+        continuations = []
+        for prefix, full in zip(decoded_prompts, decoded_full):
+            if not full.startswith(prefix):
+                raise RuntimeError("Decoded prompt changed at generation boundary.")
+            continuations.append(full[len(prefix):])
 
         for task_id, text in zip(batch_ids, continuations):
             raw_samples.append({
@@ -134,7 +164,10 @@ def main():
         "batch_size": args.batch_size,
         "max_new_tokens": args.max_new_tokens,
         "num_problems": len(problems),
-        "adapter_path": str(adapter),
+        "checkpoint_type": "adapter" if args.adapter_path else "full",
+        "checkpoint_path": str(checkpoint),
+        "adapter_path": str(checkpoint) if args.adapter_path else None,
+        "model_path": str(model_source),
         "postprocessing": "stop at fence or new top-level definition",
     }
     (output_file.parent / "generation_config.json").write_text(

@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=160G
-#SBATCH --time=02:00:00
+#SBATCH --time=06:00:00
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:?}"
@@ -47,7 +47,7 @@ srun --ntasks=1 --kill-on-bad-exit=1 \
     python evaluation/eval_llama2_code.py \
     "${MODEL_ARGS[@]}" \
     --output-file "$RESULT_DIR/samples.jsonl" \
-    --batch-size 4 \
+    --batch-size 16 \
     --max-new-tokens 512
 
 echo "Generation finished; scoring HumanEval..."

@@ -5,13 +5,13 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --partition=lucchi-h200
-#SBATCH --qos=h200
-#SBATCH --gres=gpu:1
+#SBATCH --qos=lucchi
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=160G
 #SBATCH --time=06:00:00
 
-# export MAX_STEPS=-1
+# export MAX_STEPS=2
 
 # echo MAX STEPS = $MAX_STEPS
 
@@ -22,13 +22,17 @@ source ./code_job_common.sh "$@"
 export WANDB_MODE="${WANDB_MODE:-online}"
 export WANDB_PROJECT="${WANDB_PROJECT:-LLAMA-2-7B}"
 export WANDB_DIR="${SLURM_SUBMIT_DIR}/logs/wandb"
+export WANDB_ENTITY="jim-zhao-university-of-basel"
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 
 mkdir -p "$WANDB_DIR"
 
+echo $WANDB_MODE
+echo $WANDB_PROJECT
+echo $WANDB_DIR
 
-NPROC=1
+NPROC=2
 export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK / NPROC))
 
 python - <<'PY'
@@ -36,7 +40,7 @@ import torch
 import flash_attn
 
 assert torch.cuda.is_available()
-assert torch.cuda.device_count() == 1
+assert torch.cuda.device_count() == 2
 print("PyTorch:", torch.__version__)
 print("FlashAttention:", flash_attn.__version__)
 PY
@@ -72,7 +76,7 @@ srun --ntasks=1 --kill-on-bad-exit=1 \
     --rank "$LORA_R" \
     --alpha "$LORA_ALPHA" \
     --global-batch-size 32 \
-    --per-device-batch-size 32 \
+    --per-device-batch-size 16 \
     --epochs 1 \
     --max-steps "${MAX_STEPS:--1}" \
     --output-dir "$RUN_DIR"

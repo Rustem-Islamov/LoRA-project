@@ -60,8 +60,10 @@ def parse_args():
 
 def main():
     args = parse_args()
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    global_rank = int(os.getenv("RANK", "0"))
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    
     torch.cuda.set_device(local_rank)
 
     is_pro = args.lora != "lora"
@@ -99,32 +101,26 @@ def main():
 
     wandb_run = None
     wandb_enabled = os.getenv("WANDB_MODE", "online").lower() != "disabled"
+    
+    print(os.getenv("WANDB_ENTITY"), os.getenv("WANDB_PROJECT", "LLAMA-2-7B") )
     if global_rank == 0 and wandb_enabled:
         wandb_run = wandb.init(
-            entity=os.getenv("WANDB_ENTITY") or None,
             project=os.getenv("WANDB_PROJECT", "LLAMA-2-7B"),
-            name=run_name,
+            name=output.name,
             group="Transformers-Math",
             config={
                 "method": args.lora,
                 "learning_rate": args.lr,
                 "seed": args.seed,
                 "data_seed": args.seed,
-                "rank": LORA_RANK,
-                "lora_alpha": LORA_ALPHA,
-                "use_rslora": True,
+                "rank": args.rank,
+                "lora_alpha": args.alpha,
+                "use_rslora": use_rs,
                 "scaling_formula": "alpha/sqrt(rank)",
-                "scaling_factor": LORA_ALPHA / math.sqrt(LORA_RANK),
-                "m_x_averaging": args.m_x_averaging,
-                "m_x_damping": args.m_x_damping,
-                "m_x_scale_clip": args.m_x_scale_clip,
-                "metric_tag": run_metric_tag,
-                "metric_definition": "diagonal EMA of mean squared adapter inputs",
-                "metric_update_timing": "once per optimizer step",
-                "metric_requires_grad": False,
+                "scaling_factor": args.alpha / math.sqrt(args.rank),
                 "global_batch_size": args.global_batch_size,
-                "per_device_train_batch_size": args.per_device_train_batch_size,
-                "gradient_accumulation_steps": gradient_accumulation_steps,
+                "per_device_train_batch_size": args.per_device_batch_size,
+                "gradient_accumulation_steps": accumulation,
                 "epochs": 1,
             },
         )
@@ -237,7 +233,6 @@ def main():
         seed=args.seed,
         data_seed=args.seed,
         logging_steps=10,
-        report_to=[],
         label_names=["labels"],
         deepspeed=ds_config,
     )

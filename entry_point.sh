@@ -8,15 +8,14 @@ mkdir -p logs/slurm logs/sweeps
 SWEEP_DIR="$(mktemp -d "$PWD/logs/sweeps/code.XXXXXX")"
 MANIFEST="${SWEEP_DIR}/sweep.tsv"
 
-MAX_STEPS=2
 
 python - "$MANIFEST" <<'PY'
 import itertools
 import sys
 
 # Edit these values before submitting.
-seeds = [0] #, 1
-learning_rates = [2e-5]  # Examples; replace with your range. , 8e-5, 3.2e-4
+seeds = [0, 1, 2] # 
+learning_rates = [32e-5, 64e-5] # # Examples; replace with your range. , 
 methods = ["lora"]
 rank = 8
 alpha = 16

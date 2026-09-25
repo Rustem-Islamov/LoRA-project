@@ -67,48 +67,24 @@ def main():
     wandb_run = None
     wandb_enabled = os.getenv("WANDB_MODE", "online").lower() != "disabled"
 
-    wandb.login()
     
     if global_rank == 0 and wandb_enabled:
         print(os.getenv("WANDB_ENTITY"), os.getenv("WANDB_PROJECT", "LLAMA-2-7B") )
 
-        rank = dist.get_rank() if dist.is_initialized() else -1
-
-        print(
-            f"before wandb: pid={os.getpid()}, "
-            f"rank={rank}, "
-            f"local_rank={os.environ.get('LOCAL_RANK')}",
-            flush=True,
-        )
-
-        try:
-            r = requests.get("https://api.wandb.ai", timeout=10)
-            print(
-                f"W&B HTTP reachable from rank {rank}: "
-                f"status={r.status_code}",
-                flush=True,
-            )
-        except Exception as e:
-            print(
-                f"W&B HTTP FAILED from rank {rank}: "
-                f"{type(e).__name__}: {e}",
-                flush=True,
-            )
         wandb_run = wandb.init(
             project=os.getenv("WANDB_PROJECT", "LLAMA-2-7B"),
             name=output.name,
-            # mode="offline"
-            # group="Transformers-Math",
-            # config={
-            #     "method": 'full-finetuning',
-            #     "learning_rate": args.lr,
-            #     "seed": args.seed,
-            #     "data_seed": args.seed,
-            #     "global_batch_size": args.global_batch_size,
-            #     "per_device_train_batch_size": args.per_device_batch_size,
-            #     "gradient_accumulation_steps": accumulation,
-            #     "epochs": 1,
-            # },
+            group="Transformers-Code",
+            config={
+                "method": 'full-finetuning',
+                "learning_rate": args.lr,
+                "seed": args.seed,
+                "data_seed": args.seed,
+                "global_batch_size": args.global_batch_size,
+                "per_device_train_batch_size": args.per_device_batch_size,
+                "gradient_accumulation_steps": accumulation,
+                "epochs": 1,
+            },
         )
 
     base_model = "./models/llama-2-7b"

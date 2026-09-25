@@ -3,7 +3,7 @@ set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
 export LORAPRO_ENV="${LORAPRO_ENV:-$PWD/.venv}"
-FFT_MAX_STEPS="${MAX_STEPS:-2}"
+FFT_MAX_STEPS="${MAX_STEPS:-1}"
 
 mkdir -p logs/slurm logs/sweeps
 SWEEP_DIR="$(mktemp -d "$PWD/logs/sweeps/fft-code.XXXXXX")"
@@ -17,8 +17,8 @@ steps = int(sys.argv[2])
 if steps == 0 or steps < -1:
     raise ValueError("MAX_STEPS must be -1 or a positive integer.")
 
-seeds = [0] #, 1, 2
-learning_rates = [1e-5, ]  # Edit for the FFT sweep.
+seeds = [0, 1, 2] #
+learning_rates = [5e-6, 2e-5]  # Edit for the FFT sweep.
 
 with open(sys.argv[1], "w") as handle:
     for lr, seed in itertools.product(learning_rates, seeds):
@@ -29,12 +29,12 @@ PY
 N_RUNS="$(wc -l < "$MANIFEST")"
 LAST_TASK=$((N_RUNS - 1))
 
-TRAIN_JOB="$(sbatch --parsable --export=ALL \
+TRAIN_JOB="$(sbatch --parsable \
     --array="0-${LAST_TASK}%1" \
     train_fft_code.sh "$MANIFEST" "$FFT_MAX_STEPS")"
 TRAIN_JOB="${TRAIN_JOB%%;*}"
 
-EVAL_JOB="$(sbatch --parsable --export=ALL \
+EVAL_JOB="$(sbatch --parsable \
     --array="0-${LAST_TASK}%1" \
     --dependency="aftercorr:${TRAIN_JOB}" \
     --kill-on-invalid-dep=yes \

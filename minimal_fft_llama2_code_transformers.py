@@ -12,7 +12,10 @@ from transformers import (
     Trainer, TrainingArguments, set_seed,
 )
 import peta
+import wandb
+import requests
 
+os.environ["WANDB_SILENT"] = "true"
 
 def barrier():
     if dist.is_initialized():
@@ -46,6 +49,7 @@ def parse_args():
 def main():
     args = parse_args()
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    global_rank = int(os.getenv("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     torch.cuda.set_device(local_rank)
     if os.environ.get("PYTHONHASHSEED") != str(args.seed):
@@ -56,10 +60,59 @@ def main():
         raise ValueError("Global batch must be divisible by GPUs × per-device batch.")
     accumulation = args.global_batch_size // micro_batch
 
-    base_model = "./models/llama-2-7b"
     output = Path(args.output_dir)
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"Refusing to overwrite nonempty output: {output}")
+
+    wandb_run = None
+    wandb_enabled = os.getenv("WANDB_MODE", "online").lower() != "disabled"
+
+    wandb.login()
+    
+    if global_rank == 0 and wandb_enabled:
+        print(os.getenv("WANDB_ENTITY"), os.getenv("WANDB_PROJECT", "LLAMA-2-7B") )
+
+        rank = dist.get_rank() if dist.is_initialized() else -1
+
+        print(
+            f"before wandb: pid={os.getpid()}, "
+            f"rank={rank}, "
+            f"local_rank={os.environ.get('LOCAL_RANK')}",
+            flush=True,
+        )
+
+        try:
+            r = requests.get("https://api.wandb.ai", timeout=10)
+            print(
+                f"W&B HTTP reachable from rank {rank}: "
+                f"status={r.status_code}",
+                flush=True,
+            )
+        except Exception as e:
+            print(
+                f"W&B HTTP FAILED from rank {rank}: "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+        wandb_run = wandb.init(
+            project=os.getenv("WANDB_PROJECT", "LLAMA-2-7B"),
+            name=output.name,
+            # mode="offline"
+            # group="Transformers-Math",
+            # config={
+            #     "method": 'full-finetuning',
+            #     "learning_rate": args.lr,
+            #     "seed": args.seed,
+            #     "data_seed": args.seed,
+            #     "global_batch_size": args.global_batch_size,
+            #     "per_device_train_batch_size": args.per_device_batch_size,
+            #     "gradient_accumulation_steps": accumulation,
+            #     "epochs": 1,
+            # },
+        )
+
+    base_model = "./models/llama-2-7b"
+    
 
     ds_path = Path(args.deepspeed_config)
     zero = json.loads(ds_path.read_text()).get("zero_optimization", {})
@@ -101,7 +154,7 @@ def main():
         seed=args.seed,
         data_seed=args.seed,
         logging_steps=1,
-        report_to=[],
+        report_to=["wandb"] if wandb_enabled else [],
         label_names=["labels"],
         deepspeed=str(ds_path),
         save_safetensors=True,
@@ -200,6 +253,13 @@ def main():
         )
         (output / "TRAINING_COMPLETE").touch()
         print(f"Saved FFT checkpoint: {output}", flush=True)
+
+        if wandb_run is not None:
+            wandb_run.summary["optimizer_steps"] = int(trainer.state.global_step)
+            wandb_run.summary["metric_updates_per_layer"] = int(
+                trainer.state.global_step
+            )
+            wandb.finish()
     barrier()
 
 

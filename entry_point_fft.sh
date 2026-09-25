@@ -17,8 +17,8 @@ steps = int(sys.argv[2])
 if steps == 0 or steps < -1:
     raise ValueError("MAX_STEPS must be -1 or a positive integer.")
 
-seeds = [0]
-learning_rates = [5e-6]  # Edit for the FFT sweep.
+seeds = [0] #, 1, 2
+learning_rates = [1e-5, ]  # Edit for the FFT sweep.
 
 with open(sys.argv[1], "w") as handle:
     for lr, seed in itertools.product(learning_rates, seeds):

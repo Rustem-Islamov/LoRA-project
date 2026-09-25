@@ -107,7 +107,7 @@ def main():
         wandb_run = wandb.init(
             project=os.getenv("WANDB_PROJECT", "LLAMA-2-7B"),
             name=output.name,
-            group="Transformers-Math",
+            group="Transformers-Code",
             config={
                 "method": args.lora,
                 "learning_rate": args.lr,

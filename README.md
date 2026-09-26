@@ -29,9 +29,62 @@ pip install -e DeepSpeed-0.15.1
 
 ### Datasets and Models
 
-Install Llama-2-7B from huggingface and link it to `./models`.
+Install a base model from huggingface and link it to `./models`. The scripts in
+this repo default to `Qwen3-1.7B-Base` at `./models/Qwen3-1.7B-Base`; Llama-2-7B
+at `./models/llama-2-7b` is also supported (see `MODEL_PATHS` in
+`peta/utils/experiment.py`, or pass an arbitrary path via `--model`/`MODEL=`).
 
-Install datasets (WizardLM, MetaMathQA, and CodeFeedback-Filtered-Instruction, etc.) from huggingface and link them to `./data`.
+Install datasets (MetaMathQA, GSM8K, WizardLM, and CodeFeedback-Filtered-Instruction,
+etc.) from huggingface and link them to `./data`.
+
+## Compare LoRA, LoRA-Pro, full fine-tuning, and Metric LoRA-Pro on Qwen3-1.7B-Base
+
+Four methods share the same MetaMathQA-100k -> GSM8K pipeline:
+
+| Method            | Training script              | Slurm wrapper                    |
+|-------------------|-------------------------------|-----------------------------------|
+| LoRA (/ rsLoRA / DoRA) | `train_lora_math.py`     | `train_lora_math.sh`              |
+| LoRA-Pro          | `train_lorapro_math.py`       | `train_lorapro_math.sh`           |
+| Full fine-tuning  | `train_fft_math.py`           | `train_fft_math.sh`               |
+| Metric LoRA-Pro    | `train_metric_lorapro_math.py`| `train_metric_lorapro_math.sh`    |
+
+All four save their checkpoint under a single, hyperparameter-qualified
+directory built by `peta/utils/experiment.py`:
+
+```
+./checkpoints/<model-slug>/math/<method>/<hyperparameters>/
+```
+
+For example, LoRA at rank 8, alpha 16, learning rate 1e-4, seed 0 on
+Qwen3-1.7B-Base lands at
+`./checkpoints/qwen3-1.7b-base/math/lora/r8_a16_lr0.0001_seed0/`. Every run
+also writes a `metadata.json` recording every hyperparameter and the base
+model it started from, so two runs can never silently collide, and
+evaluation never needs to guess which base model an adapter was trained on.
+
+Every script (training and evaluation, Python and Slurm) accepts `--model`
+(or the `MODEL` environment variable in the `.sh` wrappers) to pick the base
+model, e.g.:
+
+```shell
+python train_lora_math.py --model qwen3-1.7b-base --lora lora --rank 8 --alpha 16 --lr 1e-4 --seed 0
+# or, on Slurm:
+sbatch --export=ALL,MODEL=qwen3-1.7b-base,LR=1e-4,SEED=0 train_lora_math.sh
+```
+
+All four methods are evaluated on GSM8K by the same script,
+`evaluation/eval_gsm8k.py` (Slurm wrapper: `eval_gsm8k.sh`). It auto-detects
+whether a checkpoint is a PEFT adapter (LoRA, LoRA-Pro, Metric LoRA-Pro) or a
+full model (full fine-tuning), loads the right base model automatically from
+`metadata.json`, and applies the same prompting/generation/answer-extraction
+protocol regardless of method:
+
+```shell
+torchrun --standalone --nproc_per_node=1 evaluation/eval_gsm8k.py \
+    --checkpoint ./checkpoints/qwen3-1.7b-base/math/lora/r8_a16_lr0.0001_seed0
+# or, on Slurm:
+sbatch --export=ALL,METHOD=lora,MODEL=qwen3-1.7b-base,LR=1e-4,SEED=0 eval_gsm8k.sh
+```
 
 ## Get Started
 
@@ -72,10 +125,11 @@ trainer.train()
 
 The training scripts  can be found in `./scripts/llama-2-7b_transformers.sh`
 
-For math task,
+For math task (now generalized to any local causal LM, defaulting to
+Qwen3-1.7B-Base; pass `--model llama-2-7b` to reproduce the original setup),
 
 ```shell
-torchrun --nproc_per_node=8 minimal_lora_llama2_math_transformers.py --lora rslora-pro --seed 0
+torchrun --nproc_per_node=8 train_lora_math.py --model llama-2-7b --lora rslora-pro --seed 0
 ```
 
 For code task,

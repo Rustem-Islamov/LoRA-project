@@ -6,9 +6,9 @@
 #SBATCH --ntasks=1
 #SBATCH --partition=a100-80g
 #SBATCH --qos=a100-6hours
-#SBATCH --gres=gpu:2
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=200G
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=100G
 #SBATCH --time=06:00:00
 
 set -euo pipefail
@@ -26,22 +26,24 @@ export PATH="${CUDA_HOME}/bin:${PATH}"
 export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
 
 export TOKENIZERS_PARALLELISM=false
-export WANDB_MODE=online
-export WANDB_PROJECT=LLAMA-2-7B
+export WANDB_MODE="${WANDB_MODE:-online}"
+export WANDB_PROJECT="${WANDB_PROJECT:-Qwen3-1.7B-Math}"
 export WANDB_DIR="${SLURM_SUBMIT_DIR}/logs/wandb"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export NCCL_DEBUG=WARN
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-NPROC=2
+# Override any of these at submission time, for example:
+# sbatch --export=ALL,MODEL=qwen3-1.7b-base,SEED=1,LR=2e-5 train_fft_math.sh
+MODEL="${MODEL:-qwen3-1.7b-base}"
+SEED="${SEED:-0}"
+LR="${LR:-2e-5}"
+ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-sdpa}"
+NPROC="${NPROC:-1}"
 export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK / NPROC))
 
-SEED="${SEED:-1}"
-LR="${LR:-5e-6}"
-OUTPUT_DIR="./logs/transformers/llama-2-7b/math/${LR}/full-ft/${SEED}"
-
-mkdir -p "$WANDB_DIR" "$OUTPUT_DIR"
+mkdir -p "$WANDB_DIR"
 
 echo "========================================================================"
 echo "Job started:          $(date)"
@@ -49,35 +51,34 @@ echo "Job ID:               ${SLURM_JOB_ID}"
 echo "Host:                 $(hostname)"
 echo "Working directory:    $(pwd)"
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-unset}"
-echo "Output directory:     ${OUTPUT_DIR}"
+echo "Model:                ${MODEL}"
 echo "Seed:                 ${SEED}"
 echo "Learning rate:        ${LR}"
 echo "========================================================================"
 
-test -f ./models/llama-2-7b/config.json
+python - "${MODEL}" <<'PY'
+import sys
+from pathlib import Path
+from peta.utils import resolve_model_path
+
+model_path = Path(resolve_model_path(sys.argv[1]))
+assert (model_path / "config.json").is_file(), f"Base model not found at {model_path}"
+PY
 test -d ./data/MetaMathQA
 test -f ./config/deepspeed_zero3_fullft_2gpu.json
-test -f ./minimal_fft_llama2_math_transformers.py
+test -f ./train_fft_math.py
 
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 python - <<'PY'
-import deepspeed
-import flash_attn
 import torch
 
 print("PyTorch:", torch.__version__)
 print("PyTorch CUDA:", torch.version.cuda)
-print("FlashAttention:", flash_attn.__version__)
-print("DeepSpeed:", deepspeed.__version__)
 print("CUDA available:", torch.cuda.is_available())
 print("GPU count:", torch.cuda.device_count())
 
 assert torch.cuda.is_available()
-assert torch.cuda.device_count() == 2
-for index in range(2):
-    total_gib = torch.cuda.get_device_properties(index).total_memory / 2**30
-    assert total_gib >= 75, f"GPU {index} has only {total_gib:.1f} GiB"
 PY
 
 # Build the repository's raw-data cache before the distributed launch. Its
@@ -101,10 +102,10 @@ srun --ntasks=1 --kill-on-bad-exit=1 \
     --standalone \
     --nnodes=1 \
     --nproc_per_node="${NPROC}" \
-    ./minimal_fft_llama2_math_transformers.py \
-    --model-path ./models/llama-2-7b \
+    ./train_fft_math.py \
+    --model "${MODEL}" \
+    --attn-implementation "${ATTN_IMPLEMENTATION}" \
     --deepspeed-config ./config/deepspeed_zero3_fullft_2gpu.json \
-    --output-dir "$OUTPUT_DIR" \
     --seed "$SEED" \
     --lr "$LR" \
     --max-length 1024 \

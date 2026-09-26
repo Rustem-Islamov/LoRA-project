@@ -11,8 +11,9 @@ Submodules:
 from typing import Iterable
 import importlib
 
-from . import collections, logging, path
+from . import collections, experiment, logging, path
 from .args import *
+from .experiment import *
 from .logging import TitledLog, titled_log
 from .timeit import *
 

@@ -1,5 +1,9 @@
 #!/usr/bin/env python
-"""Full-parameter Llama-2-7B fine-tuning on the LoRA-Pro MetaMathQA split."""
+"""Full-parameter fine-tuning on the LoRA-Pro MetaMathQA split.
+
+Works with any local causal-LM checkpoint (e.g. Qwen3-1.7B-Base or
+Llama-2-7B) via ``transformers``' ``Auto*`` classes.
+"""
 
 import argparse
 import os
@@ -16,6 +20,13 @@ from transformers import (
 )
 
 import peta
+from peta.utils import (
+    DEFAULT_MODEL,
+    build_output_dir,
+    build_run_name,
+    resolve_model_path,
+    save_run_metadata,
+)
 
 
 class WandbMetadataCallback(TrainerCallback):
@@ -34,12 +45,21 @@ class WandbMetadataCallback(TrainerCallback):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", default="./models/llama-2-7b")
-    parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Model key (e.g. qwen3-1.7b-base, llama-2-7b) or a local path.",
+    )
+    parser.add_argument(
+        "--attn-implementation",
+        default="sdpa",
+        help="e.g. sdpa (portable) or flash_attention_2 (requires flash-attn).",
+    )
     parser.add_argument(
         "--deepspeed-config",
         default="./config/deepspeed_zero3_fullft_2gpu.json",
     )
+    parser.add_argument("--output-root", default="./checkpoints")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--max-length", type=int, default=1024)
@@ -62,22 +82,29 @@ def main():
         )
     gradient_accumulation_steps = cli.global_batch_size // denominator
 
-    model_path = Path(cli.model_path)
-    ds_path = Path(cli.deepspeed_config)
-    if not (model_path / "config.json").is_file():
+    model_path = resolve_model_path(cli.model)
+    if not (Path(model_path) / "config.json").is_file():
         raise FileNotFoundError(f"Base model not found at {model_path}")
-    if not ds_path.is_file():
+    run_name = build_run_name(seed=cli.seed, lr=cli.lr)
+    output_dir = build_output_dir(
+        method="full-ft",
+        run_name=run_name,
+        model=cli.model,
+        output_root=cli.output_root,
+    )
+    ds_path = cli.deepspeed_config
+    if world_size > 1 and not Path(ds_path).is_file():
         raise FileNotFoundError(f"DeepSpeed config not found at {ds_path}")
 
     set_seed(cli.seed)
-    run_name = f"llama-2-7b_math_full-ft_lr_{cli.lr:g}_seed_{cli.seed}"
+    wandb_run_name = f"{cli.model}_math_full-ft_lr{cli.lr:g}_seed{cli.seed}"
     use_wandb = os.environ.get("WANDB_MODE", "online").lower() != "disabled"
 
     # Construct TrainingArguments before from_pretrained. This lets the
     # Transformers/DeepSpeed integration activate ZeRO-3 model initialization.
     train_args = TrainingArguments(
-        output_dir=cli.output_dir,
-        run_name=run_name,
+        output_dir=str(output_dir),
+        run_name=wandb_run_name,
         do_train=True,
         do_eval=False,
         num_train_epochs=cli.epochs,
@@ -98,25 +125,25 @@ def main():
         logging_dir="./logs/transformers_logs/full-ft",
         report_to=["wandb"] if use_wandb else [],
         save_strategy="no",
-        deepspeed=str(ds_path),
+        deepspeed=ds_path if world_size > 1 else None,
         ddp_find_unused_parameters=False,
         dataloader_num_workers=4,
         seed=cli.seed,
         data_seed=cli.seed,
     )
 
-    tokenizer = transformers.LlamaTokenizer.from_pretrained(model_path)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
     if tokenizer.eos_token is None:
-        raise ValueError("The local Llama tokenizer has no EOS token")
+        raise ValueError("The local tokenizer has no EOS token")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     # Do not pass device_map with DeepSpeed. Every base-model parameter remains
     # trainable; there is deliberately no LoraConfig/get_peft_model call here.
-    model = transformers.LlamaForCausalLM.from_pretrained(
+    model = transformers.AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation=cli.attn_implementation,
     )
     model.config.use_cache = False
 
@@ -185,6 +212,7 @@ def main():
         callbacks=[
             WandbMetadataCallback(
                 {
+                    "model": cli.model,
                     "method": "full-ft",
                     "lr": cli.lr,
                     "seed": cli.seed,
@@ -199,10 +227,26 @@ def main():
 
     # All ranks must enter save_model because ZeRO-3 gathering is collective.
     model.config.use_cache = True
-    trainer.save_model(cli.output_dir)
+    trainer.save_model(str(output_dir))
     if trainer.is_world_process_zero():
-        tokenizer.save_pretrained(cli.output_dir)
-        print(f"Saved full model to {cli.output_dir}", flush=True)
+        tokenizer.save_pretrained(output_dir)
+        save_run_metadata(
+            output_dir,
+            {
+                "method": "full-ft",
+                "model": cli.model,
+                "base_model_path": model_path,
+                "learning_rate": cli.lr,
+                "seed": cli.seed,
+                "data_seed": cli.seed,
+                "global_batch_size": cli.global_batch_size,
+                "per_device_train_batch_size": cli.per_device_batch_size,
+                "gradient_accumulation_steps": gradient_accumulation_steps,
+                "sequence_length": cli.max_length,
+                "epochs": cli.epochs,
+            },
+        )
+        print(f"Saved full model to {output_dir}", flush=True)
 
 
 if __name__ == "__main__":

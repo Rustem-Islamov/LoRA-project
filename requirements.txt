@@ -17,7 +17,9 @@ torch==2.4.0
 torchmetrics==1.4.0.post0
 torchvision==0.19.0
 tqdm==4.66.4
-transformers==4.44.0
+# Qwen3 support landed in transformers 4.51.0; the Llama-2 experiments in
+# this repo also work with this newer version.
+transformers>=4.51.0
 wandb==0.18.3
 rich
 sentencepiece

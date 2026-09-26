@@ -1,5 +1,8 @@
 """LoRA-Pro fine-tuning on MetaMathQA100k with explicit scaling choice.
 
+Works with any local causal-LM checkpoint (e.g. Qwen3-1.7B-Base or
+Llama-2-7B) via ``transformers``' ``Auto*`` classes.
+
 With --rs-scaling true (the paper setup), scale = alpha / sqrt(rank).
 With --rs-scaling false, scale = alpha / rank. The selected value is used in
 both PEFT's forward pass and the repository's custom DeepSpeed LoRA-Pro
@@ -8,7 +11,6 @@ Trainer RNG state, and distributed data sampling.
 """
 
 import argparse
-import json
 import logging
 import math
 import os
@@ -25,6 +27,13 @@ import peft
 from transformers import Trainer, TrainingArguments, default_data_collator
 
 import peta
+from peta.utils import (
+    DEFAULT_MODEL,
+    build_output_dir,
+    build_run_name,
+    resolve_model_path,
+    save_run_metadata,
+)
 from peta.utils import TitledLog
 import wandb
 
@@ -33,8 +42,6 @@ log = logging.getLogger(__name__)
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 torch.set_float32_matmul_precision("medium")
 
-LORA_RANK = 8
-LORA_ALPHA = 16
 TARGET_MODULES = [
     "q_proj",
     "k_proj",
@@ -57,7 +64,14 @@ def parse_bool(value: str) -> bool:
 
 def get_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Model key (e.g. qwen3-1.7b-base, llama-2-7b) or a local path.",
+    )
     parser.add_argument("--lora", default="lora-pro", type=str)
+    parser.add_argument("--rank", default=8, type=int)
+    parser.add_argument("--alpha", default=16, type=int)
     parser.add_argument(
         "--rs-scaling",
         "--rs_scaling",
@@ -67,8 +81,14 @@ def get_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--lr", default=2e-5, type=float)
+    parser.add_argument(
+        "--attn-implementation",
+        default="sdpa",
+        help="e.g. sdpa (portable) or flash_attention_2 (requires flash-attn).",
+    )
     parser.add_argument("--global-batch-size", default=32, type=int)
     parser.add_argument("--per-device-train-batch-size", default=2, type=int)
+    parser.add_argument("--output-root", default="./checkpoints")
     parser.add_argument(
         "--deepspeed-config",
         default="./config/deepspeed_zero2_lorapro_paper.json",
@@ -107,7 +127,7 @@ def verify_python_hash_seed(seed: int, global_rank: int) -> None:
 
 
 def verify_patched_deepspeed() -> Path:
-    """Reject stock or stale DeepSpeed before allocating the 7B model."""
+    """Reject stock or stale DeepSpeed before allocating the model."""
 
     import deepspeed
 
@@ -134,13 +154,13 @@ def verify_patched_deepspeed() -> Path:
 
 def attach_and_verify_lorapro_scaling(
     model: torch.nn.Module,
+    rank: int,
+    alpha: int,
     rs_scaling: bool,
 ) -> Tuple[int, List[float]]:
     """Pass PEFT's real scaling to each corresponding LoRA-Pro A factor."""
 
-    expected = (
-        LORA_ALPHA / math.sqrt(LORA_RANK) if rs_scaling else LORA_ALPHA / LORA_RANK
-    )
+    expected = (alpha / math.sqrt(rank)) if rs_scaling else (alpha / rank)
     values: List[float] = []
     count = 0
 
@@ -185,14 +205,21 @@ def main() -> None:
         raise ValueError("gradient_accumulation_steps must be at least one")
 
     selected_scaling = (
-        LORA_ALPHA / math.sqrt(LORA_RANK) if args.rs_scaling else LORA_ALPHA / LORA_RANK
+        (args.alpha / math.sqrt(args.rank)) if args.rs_scaling else (args.alpha / args.rank)
     )
     scaling_formula = "alpha/sqrt(rank)" if args.rs_scaling else "alpha/rank"
     scaling_tag = "rs-scale" if args.rs_scaling else "standard-scale"
     method = f"{args.lora}-{scaling_tag}"
-    run_name = (
-        f"llama-2-7b_math_rank_{LORA_RANK}_{method}_" f"lr_{args.lr}_seed_{args.seed}"
+
+    run_name = build_run_name(seed=args.seed, lr=args.lr, rank=args.rank, alpha=args.alpha)
+    output_dir = build_output_dir(
+        method=method,
+        run_name=run_name,
+        model=args.model,
+        output_root=args.output_root,
     )
+    wandb_run_name = f"{args.model}_math_rank{args.rank}_{method}_lr{args.lr}_seed{args.seed}"
+
     wandb_enabled = os.getenv("WANDB_MODE", "online").lower() != "disabled"
     wandb_run = None
     if global_rank == 0:
@@ -205,17 +232,18 @@ def main() -> None:
         if wandb_enabled:
             wandb_run = wandb.init(
                 entity=os.getenv("WANDB_ENTITY") or None,
-                project=os.getenv("WANDB_PROJECT", "LLAMA-2-7B-Math"),
-                name=run_name,
+                project=os.getenv("WANDB_PROJECT", "Qwen3-1.7B-Math"),
+                name=wandb_run_name,
                 group="Transformers-Math",
                 config={
+                    "model": args.model,
                     "method": method,
                     "lora_type": args.lora,
                     "learning_rate": args.lr,
                     "seed": args.seed,
                     "data_seed": args.seed,
-                    "lora_r": LORA_RANK,
-                    "lora_alpha": LORA_ALPHA,
+                    "lora_r": args.rank,
+                    "lora_alpha": args.alpha,
                     "rs_scaling": args.rs_scaling,
                     "use_rslora": args.rs_scaling,
                     "scaling_formula": scaling_formula,
@@ -227,17 +255,17 @@ def main() -> None:
                 },
             )
 
-    model_path = "./models/llama-2-7b"
-    tokenizer = transformers.LlamaTokenizer.from_pretrained(model_path)
+    model_path = resolve_model_path(args.model)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
     tokens_added = 0
     if tokenizer.eos_token is None:
         tokens_added += tokenizer.add_special_tokens({"eos_token": "</s>"})
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = transformers.LlamaForCausalLM.from_pretrained(
+    model = transformers.AutoModelForCausalLM.from_pretrained(
         model_path,
-        attn_implementation="flash_attention_2",
+        attn_implementation=args.attn_implementation,
         torch_dtype=torch.bfloat16,
         device_map={"": local_rank},
     )
@@ -246,8 +274,8 @@ def main() -> None:
     model.config.use_cache = False
 
     lora_config = LoraConfig(
-        r=LORA_RANK,
-        lora_alpha=LORA_ALPHA,
+        r=args.rank,
+        lora_alpha=args.alpha,
         lora_dropout=0.0,
         bias="none",
         target_modules=TARGET_MODULES,
@@ -266,7 +294,7 @@ def main() -> None:
             module.to(torch.float32)
 
     layer_count, scaling_values = attach_and_verify_lorapro_scaling(
-        model, args.rs_scaling
+        model, args.rank, args.alpha, args.rs_scaling
     )
     if global_rank == 0:
         print(f"LoRA layers: {layer_count}", flush=True)
@@ -296,13 +324,10 @@ def main() -> None:
             desc="Running tokenizer on dataset",
         )
 
-    output_dir = Path(
-        f"./logs/transformers/llama-2-7b/math/{args.lr}/{method}/{args.seed}"
-    )
     train_args = TrainingArguments(
         output_dir=str(output_dir),
         logging_dir="./logs/transformers_logs",
-        run_name=run_name,
+        run_name=wandb_run_name,
         do_train=True,
         do_eval=False,
         num_train_epochs=1,
@@ -325,7 +350,11 @@ def main() -> None:
         save_strategy="no",
         seed=args.seed,
         data_seed=args.seed,
-        deepspeed=args.deepspeed_config if world_size > 1 else None,
+        # LoRA-Pro's gradient adjustment is implemented inside the patched
+        # DeepSpeed ZeRO-2 optimizer (see verify_patched_deepspeed above), so
+        # DeepSpeed must run even on a single GPU -- without it, training
+        # silently degrades to plain SGD with no LoRA-Pro correction.
+        deepspeed=args.deepspeed_config,
     )
 
     trainer = Trainer(
@@ -341,29 +370,31 @@ def main() -> None:
         dist.barrier()
 
     if global_rank == 0:
-        output_dir.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(output_dir)
         tokenizer.save_pretrained(output_dir)
-        metadata = {
-            "method": method,
-            "lora_type": args.lora,
-            "learning_rate": args.lr,
-            "seed": args.seed,
-            "data_seed": args.seed,
-            "lora_r": LORA_RANK,
-            "lora_alpha": LORA_ALPHA,
-            "rs_scaling": args.rs_scaling,
-            "use_rslora": args.rs_scaling,
-            "scaling_formula": scaling_formula,
-            "scaling_factor": selected_scaling,
-            "global_batch_size": args.global_batch_size,
-            "per_device_train_batch_size": args.per_device_train_batch_size,
-            "gradient_accumulation_steps": gradient_accumulation_steps,
-            "epochs": 1,
-            "deepspeed_source": str(deepspeed_source),
-        }
-        with (output_dir / "training_config.json").open("w") as handle:
-            json.dump(metadata, handle, indent=2, sort_keys=True)
+        save_run_metadata(
+            output_dir,
+            {
+                "method": method,
+                "model": args.model,
+                "base_model_path": model_path,
+                "lora_type": args.lora,
+                "learning_rate": args.lr,
+                "seed": args.seed,
+                "data_seed": args.seed,
+                "rank": args.rank,
+                "alpha": args.alpha,
+                "rs_scaling": args.rs_scaling,
+                "use_rslora": args.rs_scaling,
+                "scaling_formula": scaling_formula,
+                "scaling_factor": selected_scaling,
+                "global_batch_size": args.global_batch_size,
+                "per_device_train_batch_size": args.per_device_train_batch_size,
+                "gradient_accumulation_steps": gradient_accumulation_steps,
+                "epochs": 1,
+                "deepspeed_source": str(deepspeed_source),
+            },
+        )
         print(f"Saved LoRA-Pro adapter at: {output_dir}", flush=True)
         if wandb_run is not None:
             wandb.finish()

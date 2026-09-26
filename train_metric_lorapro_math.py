@@ -1,4 +1,7 @@
-"""Fine-tune Llama-2-7B on MetaMathQA100k with rsLoRA-Pro + diagonal M_x.
+"""Fine-tune with rsLoRA-Pro + diagonal M_x ("Metric LoRA-Pro").
+
+Works with any local causal-LM checkpoint (e.g. Qwen3-1.7B-Base or
+Llama-2-7B) via ``transformers``' ``Auto*`` classes.
 
 M_x follows the Metric-LoRA notebook supplied with this experiment: it is an
 EMA of per-input-feature squared activations.  P_x is the clipped, damped
@@ -12,7 +15,6 @@ adapter can be evaluated with an unmodified PEFT model.
 """
 
 import argparse
-import json
 import logging
 import math
 import os
@@ -36,6 +38,13 @@ import transformers
 import peft
 from peft import LoraConfig
 import peta
+from peta.utils import (
+    DEFAULT_MODEL,
+    build_output_dir,
+    build_run_name,
+    resolve_model_path,
+    save_run_metadata,
+)
 from peta.utils import TitledLog
 import wandb
 
@@ -45,8 +54,6 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("WANDB_SILENT", "true")
 torch.set_float32_matmul_precision("medium")
 
-LORA_RANK = 8
-LORA_ALPHA = 16
 METHOD_NAME = "metric-lorapro-mx-rs-scale"
 TARGET_MODULES = [
     "q_proj",
@@ -168,6 +175,8 @@ def attach_mx_metrics(
     m_x_averaging: float,
     damping: float,
     scale_clip: float,
+    rank: int,
+    alpha: int,
 ) -> List[MxBinding]:
     """Attach one M_x state and adapter-input hook to every PEFT LoRA layer."""
 
@@ -193,7 +202,7 @@ def attach_mx_metrics(
         # The patched LoRA-Pro optimizer reads these attributes from A.
         lora_a.weight._lorapro_mx_state = state
         actual_scaling = float(module.scaling["default"])
-        expected_scaling = LORA_ALPHA / math.sqrt(LORA_RANK)
+        expected_scaling = alpha / math.sqrt(rank)
         if not math.isclose(
             actual_scaling,
             expected_scaling,
@@ -314,18 +323,9 @@ def verify_python_hash_seed(seed: int, global_rank: int) -> None:
         print(f"PYTHONHASHSEED: {configured}", flush=True)
 
 
-def canonical_float(value: float) -> str:
-    """Stable directory spelling shared with the evaluation Slurm file."""
-
-    return format(float(value), ".12g")
-
-
-def metric_tag(averaging: float, damping: float, scale_clip: float) -> str:
-    return (
-        f"mxavg_{canonical_float(averaging)}_"
-        f"damp_{canonical_float(damping)}_"
-        f"clip_{canonical_float(scale_clip)}"
-    )
+def metric_hparams(averaging: float, damping: float, scale_clip: float) -> dict:
+    """Extra hyperparameters folded into the run's directory name."""
+    return {"mxavg": averaging, "damp": damping, "clip": scale_clip}
 
 
 def verify_patched_deepspeed() -> Path:
@@ -388,14 +388,27 @@ def run_metric_unit_test() -> None:
 
 def get_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Model key (e.g. qwen3-1.7b-base, llama-2-7b) or a local path.",
+    )
     parser.add_argument("--lora", default=METHOD_NAME, choices=[METHOD_NAME])
+    parser.add_argument("--rank", default=8, type=int)
+    parser.add_argument("--alpha", default=16, type=int)
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--lr", default=2e-5, type=float)
     parser.add_argument("--m-x-averaging", default=0.90, type=float)
     parser.add_argument("--m-x-damping", default=1e-2, type=float)
     parser.add_argument("--m-x-scale-clip", default=5.0, type=float)
+    parser.add_argument(
+        "--attn-implementation",
+        default="sdpa",
+        help="e.g. sdpa (portable) or flash_attention_2 (requires flash-attn).",
+    )
     parser.add_argument("--global-batch-size", default=32, type=int)
     parser.add_argument("--per-device-train-batch-size", default=2, type=int)
+    parser.add_argument("--output-root", default="./checkpoints")
     parser.add_argument(
         "--deepspeed-config",
         default="./config/deepspeed_zero2_rslorapro_mx.json",
@@ -434,37 +447,46 @@ def main() -> None:
         )
     gradient_accumulation_steps = args.global_batch_size // micro_global_batch
 
-    run_metric_tag = metric_tag(
-        args.m_x_averaging,
-        args.m_x_damping,
-        args.m_x_scale_clip,
+    extra_hparams = metric_hparams(
+        args.m_x_averaging, args.m_x_damping, args.m_x_scale_clip
     )
-    run_name = (
-        f"llama-2-7b_math_rank_{LORA_RANK}_{args.lora}_"
-        f"lr_{canonical_float(args.lr)}_seed_{args.seed}_{run_metric_tag}"
+    run_name = build_run_name(
+        seed=args.seed,
+        lr=args.lr,
+        rank=args.rank,
+        alpha=args.alpha,
+        extra_hparams=extra_hparams,
     )
+    output_dir = build_output_dir(
+        method=args.lora,
+        run_name=run_name,
+        model=args.model,
+        output_root=args.output_root,
+    )
+    wandb_run_name = f"{args.model}_math_rank{args.rank}_{args.lora}_lr{args.lr}_seed{args.seed}"
+
     wandb_run = None
     wandb_enabled = os.getenv("WANDB_MODE", "online").lower() != "disabled"
     if global_rank == 0 and wandb_enabled:
         wandb_run = wandb.init(
             entity=os.getenv("WANDB_ENTITY") or None,
-            project=os.getenv("WANDB_PROJECT", "LLAMA-2-7B"),
-            name=run_name,
+            project=os.getenv("WANDB_PROJECT", "Qwen3-1.7B-Math"),
+            name=wandb_run_name,
             group="Transformers-Math",
             config={
+                "model": args.model,
                 "method": args.lora,
                 "learning_rate": args.lr,
                 "seed": args.seed,
                 "data_seed": args.seed,
-                "rank": LORA_RANK,
-                "lora_alpha": LORA_ALPHA,
+                "rank": args.rank,
+                "lora_alpha": args.alpha,
                 "use_rslora": True,
                 "scaling_formula": "alpha/sqrt(rank)",
-                "scaling_factor": LORA_ALPHA / math.sqrt(LORA_RANK),
+                "scaling_factor": args.alpha / math.sqrt(args.rank),
                 "m_x_averaging": args.m_x_averaging,
                 "m_x_damping": args.m_x_damping,
                 "m_x_scale_clip": args.m_x_scale_clip,
-                "metric_tag": run_metric_tag,
                 "metric_definition": "diagonal EMA of mean squared adapter inputs",
                 "metric_update_timing": "once per optimizer step",
                 "metric_requires_grad": False,
@@ -475,8 +497,8 @@ def main() -> None:
             },
         )
 
-    model_path = "./models/llama-2-7b"
-    tokenizer = transformers.LlamaTokenizer.from_pretrained(
+    model_path = resolve_model_path(args.model)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_path,
         local_files_only=True,
     )
@@ -485,9 +507,9 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = transformers.LlamaForCausalLM.from_pretrained(
+    model = transformers.AutoModelForCausalLM.from_pretrained(
         model_path,
-        attn_implementation="flash_attention_2",
+        attn_implementation=args.attn_implementation,
         torch_dtype=torch.bfloat16,
         device_map={"": local_rank},
         local_files_only=True,
@@ -497,8 +519,8 @@ def main() -> None:
     model.config.use_cache = False
 
     lora_config = LoraConfig(
-        r=LORA_RANK,
-        lora_alpha=LORA_ALPHA,
+        r=args.rank,
+        lora_alpha=args.alpha,
         lora_dropout=0.0,
         bias="none",
         target_modules=TARGET_MODULES,
@@ -520,6 +542,8 @@ def main() -> None:
         m_x_averaging=args.m_x_averaging,
         damping=args.m_x_damping,
         scale_clip=args.m_x_scale_clip,
+        rank=args.rank,
+        alpha=args.alpha,
     )
     expected_layers = int(model.config.num_hidden_layers) * len(TARGET_MODULES)
     if len(mx_bindings) != expected_layers:
@@ -531,7 +555,7 @@ def main() -> None:
         print(f"Attached diagonal M_x to {len(mx_bindings)} LoRA layers", flush=True)
         print(
             "rsLoRA scale:",
-            LORA_ALPHA / math.sqrt(LORA_RANK),
+            args.alpha / math.sqrt(args.rank),
             "gradient accumulation:",
             gradient_accumulation_steps,
             flush=True,
@@ -561,17 +585,10 @@ def main() -> None:
             desc="Running tokenizer on dataset",
         )
 
-    output_dir = (
-        Path("./logs/transformers/llama-2-7b/math")
-        / canonical_float(args.lr)
-        / args.lora
-        / run_metric_tag
-        / str(args.seed)
-    )
     train_args = TrainingArguments(
         output_dir=str(output_dir),
         logging_dir="./logs/transformers_logs",
-        run_name=run_name,
+        run_name=wandb_run_name,
         do_train=True,
         do_eval=False,
         num_train_epochs=1,
@@ -595,7 +612,12 @@ def main() -> None:
         seed=args.seed,
         data_seed=args.seed,
         dataloader_num_workers=4,
-        deepspeed=args.deepspeed_config if world_size > 1 else None,
+        # Metric LoRA-Pro's gradient adjustment is implemented inside the
+        # patched DeepSpeed ZeRO-2 optimizer (see verify_patched_deepspeed
+        # above), so DeepSpeed must run even on a single GPU -- without it,
+        # training silently degrades to plain SGD with no LoRA-Pro/M_x
+        # correction.
+        deepspeed=args.deepspeed_config,
     )
 
     trainer = MxTrainer(
@@ -639,37 +661,39 @@ def main() -> None:
         model.save_pretrained(output_dir)
         tokenizer.save_pretrained(output_dir)
         torch.save(mx_state_cpu, output_dir / "mx_metric_state.pt")
-        metadata = {
-            "method": args.lora,
-            "learning_rate": args.lr,
-            "seed": args.seed,
-            "data_seed": args.seed,
-            "rank": LORA_RANK,
-            "lora_alpha": LORA_ALPHA,
-            "use_rslora": True,
-            "scaling_formula": "alpha/sqrt(rank)",
-            "scaling_factor": LORA_ALPHA / math.sqrt(LORA_RANK),
-            "m_x_averaging": args.m_x_averaging,
-            "m_x_damping": args.m_x_damping,
-            "m_x_scale_clip": args.m_x_scale_clip,
-            "metric_tag": run_metric_tag,
-            "metric_definition": "diagonal EMA of mean squared adapter inputs",
-            "metric_normalization": "M_x / mean(M_x)",
-            "metric_transform": "clamp(rsqrt(normalized_M_x + damping), 1/clip, clip)",
-            "metric_update_timing": "once per optimizer step after parameter update",
-            "metric_synchronized_across_data_parallel_ranks": True,
-            "metric_requires_grad": False,
-            "metric_folded_into_lora_A": True,
-            "global_batch_size": args.global_batch_size,
-            "per_device_train_batch_size": args.per_device_train_batch_size,
-            "gradient_accumulation_steps": gradient_accumulation_steps,
-            "epochs": 1,
-            "optimizer_steps": int(trainer.state.global_step),
-            "metric_updates_per_layer": sorted(update_counts),
-            "deepspeed_source": str(deepspeed_source),
-        }
-        with (output_dir / "mx_training_config.json").open("w") as handle:
-            json.dump(metadata, handle, indent=2, sort_keys=True)
+        save_run_metadata(
+            output_dir,
+            {
+                "method": args.lora,
+                "model": args.model,
+                "base_model_path": model_path,
+                "learning_rate": args.lr,
+                "seed": args.seed,
+                "data_seed": args.seed,
+                "rank": args.rank,
+                "alpha": args.alpha,
+                "use_rslora": True,
+                "scaling_formula": "alpha/sqrt(rank)",
+                "scaling_factor": args.alpha / math.sqrt(args.rank),
+                "m_x_averaging": args.m_x_averaging,
+                "m_x_damping": args.m_x_damping,
+                "m_x_scale_clip": args.m_x_scale_clip,
+                "metric_definition": "diagonal EMA of mean squared adapter inputs",
+                "metric_normalization": "M_x / mean(M_x)",
+                "metric_transform": "clamp(rsqrt(normalized_M_x + damping), 1/clip, clip)",
+                "metric_update_timing": "once per optimizer step after parameter update",
+                "metric_synchronized_across_data_parallel_ranks": True,
+                "metric_requires_grad": False,
+                "metric_folded_into_lora_A": True,
+                "global_batch_size": args.global_batch_size,
+                "per_device_train_batch_size": args.per_device_train_batch_size,
+                "gradient_accumulation_steps": gradient_accumulation_steps,
+                "epochs": 1,
+                "optimizer_steps": int(trainer.state.global_step),
+                "metric_updates_per_layer": sorted(update_counts),
+                "deepspeed_source": str(deepspeed_source),
+            },
+        )
         print(f"Saved evaluation-ready adapter at: {output_dir}", flush=True)
         if wandb_run is not None:
             wandb_run.summary["optimizer_steps"] = int(trainer.state.global_step)

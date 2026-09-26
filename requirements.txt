@@ -1,4 +1,6 @@
-accelerate==0.33.0
+# TrainingArguments.data_seed requires accelerate>=1.1.0 under
+# transformers>=4.51.0 (needed for Qwen3 support; see below).
+accelerate>=1.1.0
 datasets==2.19.2
 fire==0.6.0
 h5py==3.12.1

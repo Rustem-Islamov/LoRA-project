@@ -606,7 +606,7 @@ def main() -> None:
         report_to=["wandb"] if wandb_enabled else [],
         label_names=["labels"],
         ddp_find_unused_parameters=False,
-        evaluation_strategy="no",
+        eval_strategy="no",
         save_strategy="no",
         max_grad_norm=1.0,
         seed=args.seed,

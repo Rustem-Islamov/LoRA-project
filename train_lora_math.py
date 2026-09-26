@@ -219,7 +219,7 @@ def main():
         label_names=["labels"],
         ddp_find_unused_parameters=False,
         do_eval=False,
-        evaluation_strategy="no",
+        eval_strategy="no",
         save_strategy="no",
         seed=args.seed,
         data_seed=args.seed,

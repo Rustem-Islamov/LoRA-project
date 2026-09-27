@@ -5,6 +5,7 @@ data/
 data_cache/
 logs/
 wandb/
+checkpoints/
 *.out
 *.err
 __pycache__/

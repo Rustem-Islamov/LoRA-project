@@ -29,7 +29,7 @@ export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
 # sbatch --export=ALL,MODEL=qwen3-1.7b-base,SEED=1,LR=1e-4 train_lorapro_math.sh
 MODEL="${MODEL:-qwen3-1.7b-base}"
 SEED="${SEED:-0}"
-LR="${LR:-1e-4}"
+LR="${LR:-32e-5}"
 RANK="${RANK:-8}"
 ALPHA="${ALPHA:-16}"
 RS_SCALING="${RS_SCALING:-true}"

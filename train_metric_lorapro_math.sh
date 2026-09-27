@@ -4,12 +4,12 @@
 #SBATCH --error=logs/metric-lorapro_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --partition=a100-80g
-#SBATCH --qos=a100-6hours
+#SBATCH --partition=a100-80g,a100
+#SBATCH --qos=a100-1day
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=80G
-#SBATCH --time=06:00:00
+#SBATCH --time=12:00:00
 
 set -euo pipefail
 
@@ -41,7 +41,7 @@ mkdir -p "$WANDB_DIR"
 # sbatch --export=ALL,SEED=1,LR=2e-5,M_X_AVERAGING=0.95 train_metric_lorapro_math.sh
 MODEL="${MODEL:-qwen3-1.7b-base}"
 SEED="${SEED:-0}"
-LR="${LR:-2e-5}"
+LR="${LR:-4e-5}"
 RANK="${RANK:-8}"
 ALPHA="${ALPHA:-16}"
 M_X_AVERAGING="${M_X_AVERAGING:-0.90}"

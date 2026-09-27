@@ -16,10 +16,16 @@ import argparse
 import json
 import os
 import re
+import sys
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Python does not add the repository root to sys.path for a script run from
+# a subdirectory (python evaluation/eval_gsm8k.py), so "import peta" would
+# otherwise fail regardless of the caller's current working directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 import torch.distributed as dist

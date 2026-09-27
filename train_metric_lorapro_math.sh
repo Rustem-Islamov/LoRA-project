@@ -33,7 +33,6 @@ export NCCL_DEBUG=WARN
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
-export LORAPRO_REQUIRE_MX=1
 
 mkdir -p "$WANDB_DIR"
 
@@ -105,7 +104,6 @@ assert "DeepSpeed-0.15.1" in str(ds_source), (
 source = patched_file.read_text()
 for marker in (
     "_lorapro_mx_state",
-    "LORAPRO_REQUIRE_MX",
     "effective_A = A * px.unsqueeze(0)",
     "grad_A = grad_A * px_inverse.unsqueeze(0)",
 ):

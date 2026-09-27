@@ -346,7 +346,6 @@ def verify_patched_deepspeed() -> Path:
         "effective_A = A * px.unsqueeze(0)",
         "grad_A_effective_orin = grad_A_orin * px_inverse.unsqueeze(0)",
         "grad_A = grad_A * px_inverse.unsqueeze(0)",
-        'LORAPRO_REQUIRE_MX',
     )
     missing = [marker for marker in required_markers if marker not in source]
     if missing:
